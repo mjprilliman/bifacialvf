@@ -35,6 +35,7 @@ from tqdm import tqdm
 from bifacialvf.vf import getBackSurfaceIrradiances, getFrontSurfaceIrradiances, getGroundShadeFactors
 from bifacialvf.vf import getSkyConfigurationFactors, trackingBFvaluescalculator, rowSpacing
 from bifacialvf.sun import  perezComp,  sunIncident, sunrisecorrectedsunposition #, hrSolarPos, solarPos,
+from bifacialvf.loadVFresults import loadVFresults
 
 #from bifacialvf.readepw import readepw
 
@@ -594,12 +595,183 @@ def simulate(myTMY3, meta, writefiletitle=None, tilt=0, sazm=180,
         print( "Finished")
         
         return
+
+def skycomposition_method(myTMY3, meta, writefiletitle=None, tilt=0, sazm=180, 
+             clearance_height=None, hub_height = None, 
+             pitch=None, rowType='interior', transFactor=0.01, sensorsy=6, 
+             PVfrontSurface='glass', PVbackSurface='glass', albedo=None,  
+             tracking=False, backtrack=True, limit_angle=45,
+             calculatePVMismatch=False, cellsnum= 72, 
+             portraitorlandscape='landscape', bififactor = 1.0,
+             calculateBilInterpol=False, BilInterpolParams=None,
+             deltastyle='TMY3', agriPV=False):
+
+
+        '''
+      
+        Description
+        -----------
+        Main function to run the bifacialvf routines 
+    
+        Parameters
+        ---------- 
+        tmyFile (string): Baseline weather file used to modify input weather data for sky composition method
+            DNI, DHI, it can also have DryBulb, Wspd, zenith, azimuth,
+        meta (dict): A dictionary conatining keys: 'latitude', 'longitude', 'TZ', 'Name'
+        writefiletitle:  name of output file
+        tilt:    tilt angle in degrees.  Not used for tracking
+        sazm:    surface azimuth orientation in degrees east of north. For tracking this is the tracker axis orientation
+        C:       normalized ground clearance.  For trackers, this is the module height at zero tilt
+        pitch:     row-to-row normalized distance.  = 1/GCR
+        transFactor:   PV module transmission fraction.  Default 1% (0.01)
+        sensorsy:      Number of points along the module chord to return irradiance values.  Default 6 (1-up landscape module)
+        limit_angle:     1-axis tracking maximum limits of rotation
+        tracking, backtrack:  boolean to enable 1-axis tracking and pvlib backtracking algorithm, respectively
+        albedo:     If a value is passed, that value will be used for all the simulations.
+                    If None is passed (or albedo argument is not passed), program will search the 
+                    TMY file for the "Albe (unitless)" column and use those values
+
+        New Parameters: 
+        # Dictionary input example:
+        # calculateBilInterpol = {'interpolA':0.005, 'IVArray':None, 'beta_voc_all':None, 'm_all':None, 'bee_all':None}
+
+        
+        Returns
+        -------
+        none
+        '''    
+
+        if writefiletitle == None:
+            writefiletitle = "data/Output/baseline.csv"
+
+        #Baseline
+        write_file_baseline = writefiletitle[:-4] + "_baseline.csv"
+        simulate(myTMY3=myTMY3, meta=meta, writefiletitle=write_file_baseline, tilt=tilt, sazm=sazm, 
+             clearance_height=clearance_height, hub_height = hub_height, 
+             pitch=pitch, rowType='interior', transFactor=transFactor, sensorsy=sensorsy, 
+             PVfrontSurface='glass', PVbackSurface='glass', albedo=albedo,  
+             tracking=tracking, backtrack=backtrack, limit_angle=limit_angle,
+             calculatePVMismatch=calculatePVMismatch, cellsnum= cellsnum, 
+             portraitorlandscape=portraitorlandscape, bififactor = bififactor,
+             calculateBilInterpol=calculateBilInterpol, BilInterpolParams=BilInterpolParams,
+             deltastyle=deltastyle, agriPV=agriPV)
+        
+        (data, metadata) = loadVFresults(write_file_baseline)
+        composite_data = data
+
+        #C - DNI & Alb to 0
+        myTMY3_DNIALB0 = myTMY3.copy()
+        myTMY3_DNIALB0.loc[:, "DNI"] = 0
+        myTMY3_DNIALB0.loc[:, "Alb"] = 0
+        write_file_DNIALB0 = writefiletitle[:-4] + "_DNIALB0.csv"
+        simulate(myTMY3=myTMY3_DNIALB0, meta=meta, writefiletitle=write_file_DNIALB0, tilt=tilt, sazm=sazm, 
+             clearance_height=clearance_height, hub_height = hub_height, 
+             pitch=pitch, rowType='interior', transFactor=transFactor, sensorsy=sensorsy, 
+             PVfrontSurface='glass', PVbackSurface='glass', albedo=0,  
+             tracking=tracking, backtrack=backtrack, limit_angle=limit_angle,
+             calculatePVMismatch=calculatePVMismatch, cellsnum= cellsnum, 
+             portraitorlandscape=portraitorlandscape, bififactor = bififactor,
+             calculateBilInterpol=calculateBilInterpol, BilInterpolParams=BilInterpolParams,
+             deltastyle=deltastyle, agriPV=agriPV)
+        (data, metadata) = loadVFresults(write_file_DNIALB0)
+        composite_data["Avg_RowBackGTI_DHIDirect"] = 0
+        for x in np.arange(1, sensorsy+1, 1):
+            #data.loc[:, "No_"+str(x)+"_RowBackGTI"] = data.loc[:, "No_"+str(x)+"_RowBackGTI"] - composite_data.loc[:, "No_"+str(x)+"_RowBackGTI_DNI0"]
+            old_string = "No_"+str(x)+"_RowBackGTI" 
+            new_string = "No_"+str(x) + "_RowBackGTI_DHIDirect"
+            composite_data[new_string] = data[old_string]
+            composite_data["Avg_RowBackGTI_DHIDirect"] = composite_data["Avg_RowBackGTI_DHIDirect"] + (composite_data[new_string]/sensorsy)
+        #composite_data["Avg_RowBackGTI_DHIDirect"] = composite_data["Avg_RowBackGTI_DHIDirect"]
+        #data.rename(dict)
+        #composite_data = pd.concat([composite_data, data])
+        
+        #D - DHI & Alb to 0
+        myTMY3_DHIALB0 = myTMY3.copy()
+        myTMY3_DHIALB0.loc[:, "DHI"] = 0
+        myTMY3_DHIALB0.loc[:, "Alb"] = 0
+        write_file_DHIALB0 = writefiletitle[:-4] + "_DHIALB0.csv"
+        simulate(myTMY3=myTMY3_DHIALB0, meta=meta, writefiletitle=write_file_DHIALB0, tilt=tilt, sazm=sazm, 
+             clearance_height=clearance_height, hub_height = hub_height, 
+             pitch=pitch, rowType='interior', transFactor=transFactor, sensorsy=sensorsy, 
+             PVfrontSurface='glass', PVbackSurface='glass', albedo=0,  
+             tracking=tracking, backtrack=backtrack, limit_angle=limit_angle,
+             calculatePVMismatch=calculatePVMismatch, cellsnum= cellsnum, 
+             portraitorlandscape=portraitorlandscape, bififactor = bififactor,
+             calculateBilInterpol=calculateBilInterpol, BilInterpolParams=BilInterpolParams,
+             deltastyle=deltastyle, agriPV=agriPV)
+        
+        (data, metadata) = loadVFresults(write_file_DHIALB0)
+        composite_data["Avg_RowBackGTI_DNIDirect"] = 0
+        for x in np.arange(1, sensorsy+1, 1):
+            #data.loc[:, "No_"+str(x)+"_RowBackGTI"] = data.loc[:, "No_"+str(x)+"_RowBackGTI"] - composite_data.loc[:, "No_"+str(x)+"_RowBackGTI_DHI0"]
+            old_string = "No_"+str(x)+"_RowBackGTI"
+            new_string = "No_"+str(x) + "_RowBackGTI_DNIDirect"
+            composite_data[new_string] = data[old_string]
+            composite_data["Avg_RowBackGTI_DNIDirect"] = composite_data["Avg_RowBackGTI_DNIDirect"] + (composite_data[new_string]/sensorsy)
+        #composite_data["Avg_RowBackGTI_DNIDirect"] = composite_data["Avg_RowBackGTI_DNIDirect"] 
+        #data.rename(dict)
+        #composite_data = pd.concat([composite_data, data])
+        
+        #A - DHI to 0
+        myTMY3_DHI0 = myTMY3.copy()
+        myTMY3_DHI0.loc[:,'DHI'] = 0
+        write_file_DHI0 = writefiletitle[:-4] + "_DHI0.csv"
+        dict = {}
+        simulate(myTMY3=myTMY3_DHI0, meta=meta, writefiletitle=write_file_DHI0, tilt=tilt, sazm=sazm, 
+             clearance_height=clearance_height, hub_height = hub_height, 
+             pitch=pitch, rowType='interior', transFactor=transFactor, sensorsy=sensorsy, 
+             PVfrontSurface='glass', PVbackSurface='glass', albedo=albedo,  
+             tracking=tracking, backtrack=backtrack, limit_angle=limit_angle,
+             calculatePVMismatch=calculatePVMismatch, cellsnum= cellsnum, 
+             portraitorlandscape=portraitorlandscape, bififactor = bififactor,
+             calculateBilInterpol=calculateBilInterpol, BilInterpolParams=BilInterpolParams,
+             deltastyle=deltastyle, agriPV=agriPV)
+        (data, metadata) = loadVFresults(write_file_DHI0)
+        composite_data["Avg_RowBackGTI_DNIReflected"] = 0
+        for x in np.arange(1, sensorsy+1, 1):
+            old_string = "No_"+str(x)+"_RowBackGTI"
+            new_string = "No_" + str(x) + "_RowBackGTI_DNIReflected"
+            composite_data[new_string] = data[old_string] - composite_data["No_"+ str(x) + "_RowBackGTI_DNIDirect"]
+            composite_data["Avg_RowBackGTI_DNIReflected"] = composite_data["Avg_RowBackGTI_DNIReflected"] + (composite_data[new_string])/sensorsy
+
+        #data.rename(dict)
+        #composite_data = pd.concat([composite_data, data])
+        
+        #B - DNI to 0
+        myTMY3_DNI0 = myTMY3.copy()
+        myTMY3_DNI0.loc[:, "DNI"] = 0
+        write_file_DNI0 = writefiletitle[:-4] + "_DNI0.csv"
+        simulate(myTMY3=myTMY3_DNI0, meta=meta, writefiletitle=write_file_DNI0, tilt=tilt, sazm=sazm, 
+             clearance_height=clearance_height, hub_height = hub_height, 
+             pitch=pitch, rowType='interior', transFactor=transFactor, sensorsy=sensorsy, 
+             PVfrontSurface='glass', PVbackSurface='glass', albedo=albedo,  
+             tracking=tracking, backtrack=backtrack, limit_angle=limit_angle,
+             calculatePVMismatch=calculatePVMismatch, cellsnum= cellsnum, 
+             portraitorlandscape=portraitorlandscape, bififactor = bififactor,
+             calculateBilInterpol=calculateBilInterpol, BilInterpolParams=BilInterpolParams,
+             deltastyle=deltastyle, agriPV=agriPV)
+        (data, metadata) = loadVFresults(write_file_DNI0)
+        composite_data["Avg_RowBackGTI_DHIReflected"] = 0
+        for x in np.arange(1, sensorsy+1, 1):
+            old_string = "No_"+str(x)+ "_RowBackGTI"
+            new_string = "No_"+ str(x) + "_RowBackGTI_DHIReflected"
+            composite_data[new_string] = data[old_string] - composite_data["No_"+ str(x) + "_RowBackGTI_DHIDirect"]
+            composite_data["Avg_RowBackGTI_DHIReflected"] = composite_data["Avg_RowBackGTI_DHIReflected"] + (composite_data[new_string])/sensorsy
+        #data.rename(dict)
+        #composite_data = pd.concat([composite_data, data])
+
+        
+        composite_data.to_csv(writefiletitle[:-4] + "_composite.csv")
+
+        return composite_data
+
         
 if __name__ == "__main__":    
 
     # IO Files
     TMYtoread="data/724010TYA.csv"   # VA Richmond
     writefiletitle="data/Output/Test_RICHMOND_1.0.csv"
+    composition_file = "data/Output/Test_sky_composition.csv"
 
     # Variables
     tilt = 10                   # PV tilt (deg)
@@ -630,6 +802,16 @@ if __name__ == "__main__":
     deltastyle = 'TMY3'
     # Function
     simulate(myTMY3, meta, writefiletitle=writefiletitle, 
+             tilt=tilt, sazm=sazm, pitch=pitch, clearance_height=clearance_height, 
+             rowType=rowType, transFactor=transFactor, sensorsy=sensorsy, 
+             PVfrontSurface=PVfrontSurface, PVbackSurface=PVbackSurface, 
+             albedo=albedo, tracking=tracking, backtrack=backtrack, 
+             limit_angle=limit_angle, calculatePVMismatch=calculatePVMismatch,
+             cellsnum = cellsnum, bififactor=bififactor,
+             calculateBilInterpol=calculateBilInterpol,
+             portraitorlandscape=portraitorlandscape, deltastyle=deltastyle)
+    
+    skycomposition_method(myTMY3, meta, writefiletitle=composition_file, 
              tilt=tilt, sazm=sazm, pitch=pitch, clearance_height=clearance_height, 
              rowType=rowType, transFactor=transFactor, sensorsy=sensorsy, 
              PVfrontSurface=PVfrontSurface, PVbackSurface=PVbackSurface, 
